@@ -148,6 +148,152 @@
       };
     })();
 
+    // Reproductor HTML5 <audio> nativo reutilizable (evita AbortError y bugs de WebAudio en Safari iOS)
+    window.libretaWebPlayer = (function () {
+      var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      var audio = null;
+      var unlocked = false;
+      var endedFlag = false;
+      var activeSrc = '';
+      var playSeq = 0;
+
+      function ensureAudio() {
+        if (audio) return audio;
+        audio = document.createElement('audio');
+        audio.setAttribute('playsinline', '');
+        audio.setAttribute('webkit-playsinline', '');
+        audio.preload = 'auto';
+        audio.style.display = 'none';
+        audio.addEventListener('ended', function () {
+          if (activeSrc && activeSrc !== SILENT_WAV) {
+            endedFlag = true;
+          }
+        });
+        if (document.body) {
+          document.body.appendChild(audio);
+        } else {
+          document.addEventListener('DOMContentLoaded', function () {
+            if (audio && !audio.parentNode && document.body) {
+              document.body.appendChild(audio);
+            }
+          });
+        }
+        return audio;
+      }
+
+      return {
+        // Llamar SINCRÓNICAMENTE al tocar Play (antes de cualquier await/fetch) para desbloquear Safari iOS
+        unlock: function () {
+          var a = ensureAudio();
+          if (unlocked) return;
+          try {
+            a.muted = true;
+            a.src = SILENT_WAV;
+            activeSrc = SILENT_WAV;
+            var p = a.play();
+            if (p && typeof p.then === 'function') {
+              p.then(function () {
+                unlocked = true;
+                if (activeSrc === SILENT_WAV) {
+                  a.pause();
+                }
+              }).catch(function () {});
+            } else {
+              unlocked = true;
+            }
+          } catch (_) {}
+        },
+
+        playUrl: async function (url, fallbackUrl) {
+          var a = ensureAudio();
+          var mySeq = ++playSeq;
+          endedFlag = false;
+
+          async function tryPlay(targetUrl) {
+            a.pause();
+            a.muted = false;
+            a.volume = 1.0;
+            activeSrc = targetUrl;
+            a.src = targetUrl;
+            if (mySeq !== playSeq) return 'superseded';
+            var p = a.play();
+            if (p && typeof p.then === 'function') {
+              await p;
+            }
+            unlocked = true;
+            return 'ok';
+          }
+
+          try {
+            return await tryPlay(url);
+          } catch (err1) {
+            if (mySeq !== playSeq) return 'superseded';
+            if (fallbackUrl && fallbackUrl !== url) {
+              try {
+                return await tryPlay(fallbackUrl);
+              } catch (err2) {
+                throw err2;
+              }
+            }
+            throw err1;
+          }
+        },
+
+        pause: function () {
+          if (audio) audio.pause();
+        },
+
+        resume: async function () {
+          var a = ensureAudio();
+          if (!activeSrc || activeSrc === SILENT_WAV) return;
+          endedFlag = false;
+          a.muted = false;
+          var p = a.play();
+          if (p && typeof p.then === 'function') {
+            await p;
+          }
+        },
+
+        stop: function () {
+          playSeq++;
+          endedFlag = false;
+          if (!audio) return;
+          audio.pause();
+          try { audio.currentTime = 0; } catch (_) {}
+        },
+
+        seekMs: function (ms) {
+          if (!audio) return;
+          try {
+            audio.currentTime = Math.max(0, ms / 1000);
+          } catch (_) {}
+        },
+
+        getPositionMs: function () {
+          if (!audio || !activeSrc || activeSrc === SILENT_WAV) return 0;
+          var t = audio.currentTime;
+          return (isFinite(t) && t >= 0) ? Math.floor(t * 1000) : 0;
+        },
+
+        getDurationMs: function () {
+          if (!audio || !activeSrc || activeSrc === SILENT_WAV) return 0;
+          var d = audio.duration;
+          return (isFinite(d) && d > 0) ? Math.floor(d * 1000) : 0;
+        },
+
+        isPaused: function () {
+          if (!audio) return true;
+          return !!audio.paused;
+        },
+
+        consumeEnded: function () {
+          if (!endedFlag) return false;
+          endedFlag = false;
+          return true;
+        }
+      };
+    })();
+
     window.addEventListener('flutter-first-frame', function () {
       var splash = document.getElementById('loading-splash');
       if (splash) {
