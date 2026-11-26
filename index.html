@@ -148,148 +148,257 @@
       };
     })();
 
-    // Reproductor HTML5 <audio> nativo reutilizable (evita AbortError y bugs de WebAudio en Safari iOS)
+    // Reproductor Web Audio API (AudioContext + decodeAudioData + Cache API offline)
+    // Inmune a NotSupportedError/AbortError de Safari iOS con blob: URLs y Content-Type incorrectos de Drive
     window.libretaWebPlayer = (function () {
-      var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-      var audio = null;
-      var unlocked = false;
+      var CACHE_NAME = 'libreta-hymn-audios-v1';
+      var ctx = null;
+      var currentSource = null;
+      var currentBuffer = null;
+      var decodedBuffers = {};
+      var startCtxTime = 0;
+      var offsetSec = 0;
+      var isPausedState = true;
       var endedFlag = false;
-      var activeSrc = '';
       var playSeq = 0;
 
-      function ensureAudio() {
-        if (audio) return audio;
-        audio = document.createElement('audio');
-        audio.setAttribute('playsinline', '');
-        audio.setAttribute('webkit-playsinline', '');
-        audio.preload = 'auto';
-        audio.style.display = 'none';
-        audio.addEventListener('ended', function () {
-          if (activeSrc && activeSrc !== SILENT_WAV) {
-            endedFlag = true;
+      function cacheKey(id) {
+        return new URL('./__hymn_audio_cache__/' + encodeURIComponent(id), window.location.href).toString();
+      }
+
+      function ensureContext() {
+        if (!ctx) {
+          var AudioCtx = window.AudioContext || window.webkitAudioContext;
+          ctx = new AudioCtx();
+        }
+        try {
+          if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
+            navigator.audioSession.type = 'playback';
+          }
+        } catch (_) {}
+        return ctx;
+      }
+
+      function decodeBuffer(audioCtx, arrayBuffer) {
+        return new Promise(function (resolve, reject) {
+          var copy = arrayBuffer.slice(0);
+          var res = audioCtx.decodeAudioData(
+            copy,
+            function (decoded) { resolve(decoded); },
+            function (err) { reject(err || new Error('No se pudo decodificar el audio')); }
+          );
+          if (res && typeof res.then === 'function') {
+            res.then(resolve).catch(reject);
           }
         });
-        if (document.body) {
-          document.body.appendChild(audio);
-        } else {
-          document.addEventListener('DOMContentLoaded', function () {
-            if (audio && !audio.parentNode && document.body) {
-              document.body.appendChild(audio);
-            }
-          });
+      }
+
+      function stopCurrentSourceOnly() {
+        if (currentSource) {
+          try {
+            currentSource.onended = null;
+            currentSource.stop(0);
+            currentSource.disconnect();
+          } catch (_) {}
+          currentSource = null;
         }
-        return audio;
+      }
+
+      function startBufferAt(audioCtx, buffer, startOffsetSec, mySeq) {
+        stopCurrentSourceOnly();
+        currentBuffer = buffer;
+        offsetSec = Math.max(0, Math.min(startOffsetSec, buffer.duration));
+        endedFlag = false;
+        var src = audioCtx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(audioCtx.destination);
+        src.onended = function () {
+          if (mySeq === playSeq && currentSource === src && !isPausedState) {
+            currentSource = null;
+            isPausedState = true;
+            offsetSec = buffer.duration;
+            endedFlag = true;
+          }
+        };
+        currentSource = src;
+        startCtxTime = audioCtx.currentTime;
+        isPausedState = false;
+        src.start(0, offsetSec);
+      }
+
+      function looksLikeHtml(bytes) {
+        if (!bytes || bytes.length < 15) return false;
+        var head = '';
+        for (var i = 0; i < Math.min(48, bytes.length); i++) {
+          head += String.fromCharCode(bytes[i]);
+        }
+        head = head.trim().toLowerCase();
+        return head.indexOf('<!doctype html') === 0 ||
+               head.indexOf('<html') === 0 ||
+               head.indexOf('<?xml') === 0;
       }
 
       return {
-        // Llamar SINCRÓNICAMENTE al tocar Play (antes de cualquier await/fetch) para desbloquear Safari iOS
+        // Desbloqueo síncrono obligatorio dentro del toque del usuario en Safari iOS
         unlock: function () {
-          var a = ensureAudio();
-          if (unlocked) return;
           try {
-            a.muted = true;
-            a.src = SILENT_WAV;
-            activeSrc = SILENT_WAV;
-            var p = a.play();
-            if (p && typeof p.then === 'function') {
-              p.then(function () {
-                unlocked = true;
-                if (activeSrc === SILENT_WAV) {
-                  a.pause();
-                }
-              }).catch(function () {});
-            } else {
-              unlocked = true;
+            var audioCtx = ensureContext();
+            if (audioCtx.state === 'suspended') {
+              audioCtx.resume().catch(function () {});
             }
+            var silent = audioCtx.createBuffer(1, 1, 22050);
+            var src = audioCtx.createBufferSource();
+            src.buffer = silent;
+            src.connect(audioCtx.destination);
+            src.start(0);
           } catch (_) {}
         },
 
-        playUrl: async function (url, fallbackUrl) {
-          var a = ensureAudio();
+        // Carga desde memoria / Cache API offline / fetch CORS a Drive, decodifica con CoreAudio y reproduce
+        playHymn: async function (hymnId, directUrl) {
+          var audioCtx = ensureContext();
           var mySeq = ++playSeq;
           endedFlag = false;
+          stopCurrentSourceOnly();
 
-          async function tryPlay(targetUrl) {
-            a.pause();
-            a.muted = false;
-            a.volume = 1.0;
-            activeSrc = targetUrl;
-            a.src = targetUrl;
-            if (mySeq !== playSeq) return 'superseded';
-            var p = a.play();
-            if (p && typeof p.then === 'function') {
-              await p;
-            }
-            unlocked = true;
-            return 'ok';
+          if (audioCtx.state === 'suspended') {
+            try { await audioCtx.resume(); } catch (_) {}
           }
 
-          try {
-            return await tryPlay(url);
-          } catch (err1) {
+          // 1. Ya decodificado en memoria -> reproducción instantánea (0 ms)
+          if (decodedBuffers[hymnId]) {
             if (mySeq !== playSeq) return 'superseded';
-            if (fallbackUrl && fallbackUrl !== url) {
-              try {
-                return await tryPlay(fallbackUrl);
-              } catch (err2) {
-                throw err2;
+            startBufferAt(audioCtx, decodedBuffers[hymnId], 0, mySeq);
+            return 'cached';
+          }
+
+          // 2. Buscar en Cache API persistente (100% offline aunque cierre la app o esté en Modo Avión)
+          var rawBuffer = null;
+          var downloadedNow = false;
+          if ('caches' in window) {
+            try {
+              var cache = await caches.open(CACHE_NAME);
+              var cachedResp = await cache.match(cacheKey(hymnId));
+              if (cachedResp) {
+                var cachedAb = await cachedResp.arrayBuffer();
+                if (cachedAb && cachedAb.byteLength > 1000 && !looksLikeHtml(new Uint8Array(cachedAb.slice(0, 64)))) {
+                  rawBuffer = cachedAb;
+                } else {
+                  await cache.delete(cacheKey(hymnId));
+                }
               }
-            }
-            throw err1;
+            } catch (_) {}
           }
+
+          // 3. Si no está en caché local, descargar directo desde Drive con CORS
+          if (!rawBuffer) {
+            if (!directUrl) {
+              throw new Error('No hay audio registrado para este himno');
+            }
+            var resp = await fetch(directUrl, { mode: 'cors', credentials: 'omit' });
+            if (!resp.ok) {
+              throw new Error('Error descargando audio (HTTP ' + resp.status + ')');
+            }
+            rawBuffer = await resp.arrayBuffer();
+            if (!rawBuffer || rawBuffer.byteLength <= 1000 || looksLikeHtml(new Uint8Array(rawBuffer.slice(0, 64)))) {
+              throw new Error('El servidor no devolvió un archivo de audio válido');
+            }
+            downloadedNow = true;
+
+            // Guardar en Cache API para uso 100% offline futuro
+            if ('caches' in window) {
+              try {
+                var c = await caches.open(CACHE_NAME);
+                await c.put(
+                  cacheKey(hymnId),
+                  new Response(rawBuffer.slice(0), {
+                    headers: {
+                      'Content-Type': 'audio/mp4',
+                      'Content-Length': String(rawBuffer.byteLength)
+                    }
+                  })
+                );
+              } catch (_) {}
+            }
+          }
+
+          if (mySeq !== playSeq) return 'superseded';
+
+          var decoded = await decodeBuffer(audioCtx, rawBuffer);
+          decodedBuffers[hymnId] = decoded;
+
+          if (mySeq !== playSeq) return 'superseded';
+
+          if (audioCtx.state === 'suspended') {
+            try { await audioCtx.resume(); } catch (_) {}
+          }
+
+          startBufferAt(audioCtx, decoded, 0, mySeq);
+          return downloadedNow ? 'downloaded' : 'cached';
         },
 
         pause: function () {
-          if (audio) audio.pause();
+          if (!ctx || !currentBuffer || isPausedState) return;
+          offsetSec = Math.max(0, Math.min(offsetSec + (ctx.currentTime - startCtxTime), currentBuffer.duration));
+          isPausedState = true;
+          stopCurrentSourceOnly();
         },
 
         resume: async function () {
-          var a = ensureAudio();
-          if (!activeSrc || activeSrc === SILENT_WAV) return;
-          endedFlag = false;
-          a.muted = false;
-          var p = a.play();
-          if (p && typeof p.then === 'function') {
-            await p;
+          if (!currentBuffer || !isPausedState) return;
+          var audioCtx = ensureContext();
+          if (audioCtx.state === 'suspended') {
+            try { await audioCtx.resume(); } catch (_) {}
           }
+          var mySeq = ++playSeq;
+          startBufferAt(audioCtx, currentBuffer, offsetSec >= currentBuffer.duration ? 0 : offsetSec, mySeq);
         },
 
         stop: function () {
           playSeq++;
           endedFlag = false;
-          if (!audio) return;
-          audio.pause();
-          try { audio.currentTime = 0; } catch (_) {}
+          isPausedState = true;
+          offsetSec = 0;
+          currentBuffer = null;
+          stopCurrentSourceOnly();
         },
 
         seekMs: function (ms) {
-          if (!audio) return;
-          try {
-            audio.currentTime = Math.max(0, ms / 1000);
-          } catch (_) {}
+          if (!currentBuffer) return;
+          var targetSec = Math.max(0, Math.min(ms / 1000, currentBuffer.duration));
+          offsetSec = targetSec;
+          if (!isPausedState && ctx) {
+            var mySeq = ++playSeq;
+            startBufferAt(ctx, currentBuffer, targetSec, mySeq);
+          }
         },
 
         getPositionMs: function () {
-          if (!audio || !activeSrc || activeSrc === SILENT_WAV) return 0;
-          var t = audio.currentTime;
-          return (isFinite(t) && t >= 0) ? Math.floor(t * 1000) : 0;
+          if (!currentBuffer) return 0;
+          if (isPausedState || !ctx) {
+            return Math.floor(offsetSec * 1000);
+          }
+          var cur = Math.min(offsetSec + (ctx.currentTime - startCtxTime), currentBuffer.duration);
+          return Math.max(0, Math.floor(cur * 1000));
         },
 
         getDurationMs: function () {
-          if (!audio || !activeSrc || activeSrc === SILENT_WAV) return 0;
-          var d = audio.duration;
-          return (isFinite(d) && d > 0) ? Math.floor(d * 1000) : 0;
+          if (!currentBuffer) return 0;
+          return Math.floor(currentBuffer.duration * 1000);
         },
 
         isPaused: function () {
-          if (!audio) return true;
-          return !!audio.paused;
+          return isPausedState;
         },
 
         consumeEnded: function () {
           if (!endedFlag) return false;
           endedFlag = false;
           return true;
+        },
+
+        clearDecoded: function (hymnId) {
+          delete decodedBuffers[hymnId];
         }
       };
     })();
