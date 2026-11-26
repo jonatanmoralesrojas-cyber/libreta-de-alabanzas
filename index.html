@@ -26,9 +26,17 @@
     html, body {
       margin: 0;
       padding: 0;
+      width: 100%;
       height: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      position: fixed;
+      inset: 0;
       background-color: #173B3F;
       overscroll-behavior: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+      touch-action: manipulation;
     }
     #loading-splash {
       position: fixed;
@@ -41,14 +49,15 @@
       color: #ffffff;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       z-index: 9999;
-      transition: opacity 0.3s ease;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
     }
     #loading-splash img {
-      width: 112px;
-      height: 112px;
-      border-radius: 26px;
+      width: 104px;
+      height: 104px;
+      border-radius: 24px;
       box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
-      margin-bottom: 18px;
+      margin-bottom: 16px;
     }
     #loading-splash h1 {
       font-size: 20px;
@@ -71,94 +80,67 @@
   </div>
 
   <script>
-    // Caché persistente offline de audios (Cache API + Blob URL) para Safari iOS y navegadores PWA
-    window.libretaAudioCache = (function () {
-      var CACHE_NAME = 'libreta-hymn-audios-v1';
-      var blobUrls = {};
+    // Limpiar cualquier Service Worker antiguo silenciosamente sin forzar recargas en iOS Standalone PWA
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister().catch(function () {}); });
+      }).catch(function () {});
+    }
 
-      if (navigator.storage && navigator.storage.persist) {
-        navigator.storage.persist().catch(function () {});
-      }
-
-      function cacheKey(id) {
-        return new URL('./__hymn_audio_cache__/' + encodeURIComponent(id), window.location.href).toString();
-      }
-
-      return {
-        getBlobUrl: async function (id) {
-          if (blobUrls[id]) return blobUrls[id];
-          if (!('caches' in window)) return null;
-          try {
-            var cache = await caches.open(CACHE_NAME);
-            var resp = await cache.match(cacheKey(id));
-            if (!resp) return null;
-            var blob = await resp.blob();
-            if (!blob || blob.size < 1000) return null;
-            var url = URL.createObjectURL(blob);
-            blobUrls[id] = url;
-            return url;
-          } catch (e) {
-            return null;
-          }
-        },
-        putAudio: async function (id, uint8Array, mimeType) {
-          var type = mimeType || 'audio/mp4';
-          var blob = new Blob([uint8Array], { type: type });
-          if (blobUrls[id]) {
-            try { URL.revokeObjectURL(blobUrls[id]); } catch (_) {}
-          }
-          var url = URL.createObjectURL(blob);
-          blobUrls[id] = url;
-          if ('caches' in window) {
-            try {
-              var cache = await caches.open(CACHE_NAME);
-              var resp = new Response(blob, {
-                headers: {
-                  'Content-Type': type,
-                  'Content-Length': String(blob.size)
-                }
-              });
-              await cache.put(cacheKey(id), resp);
-            } catch (e) {}
-          }
-          return url;
-        },
-        hasAudio: async function (id) {
-          if (blobUrls[id]) return true;
-          if (!('caches' in window)) return false;
-          try {
-            var cache = await caches.open(CACHE_NAME);
-            var resp = await cache.match(cacheKey(id));
-            return !!resp;
-          } catch (e) {
-            return false;
-          }
-        },
-        deleteAudio: async function (id) {
-          if (blobUrls[id]) {
-            try { URL.revokeObjectURL(blobUrls[id]); } catch (_) {}
-            delete blobUrls[id];
-          }
-          if (!('caches' in window)) return;
-          try {
-            var cache = await caches.open(CACHE_NAME);
-            await cache.delete(cacheKey(id));
-          } catch (e) {}
+    // Garantizar que la pantalla de carga nunca bloquee toques en Safari iOS Standalone
+    (function () {
+      var removed = false;
+      function hideSplash() {
+        if (removed) return;
+        removed = true;
+        var splash = document.getElementById('loading-splash');
+        if (splash) {
+          splash.style.opacity = '0';
+          setTimeout(function () {
+            if (splash && splash.parentNode) splash.parentNode.removeChild(splash);
+          }, 260);
         }
-      };
+      }
+      window.addEventListener('flutter-first-frame', hideSplash, { once: true });
+      if (typeof MutationObserver !== 'undefined') {
+        var obs = new MutationObserver(function () {
+          if (document.querySelector('flt-glass-pane, flutter-view')) {
+            hideSplash();
+            obs.disconnect();
+          }
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
+      }
+      setTimeout(hideSplash, 4500);
     })();
 
-    // Reproductor HTML5 <audio playsinline> directo Same-Origin (streaming instantáneo sin lag ni CORS en Safari iOS)
+    // Stub de caché web (compatibilidad)
+    window.libretaAudioCache = {
+      getBlobUrl: async function () { return null; },
+      putAudio: async function () { return null; },
+      hasAudio: async function () { return false; },
+      deleteAudio: async function () {}
+    };
+
+    // Reproductor HTML5 <audio playsinline> nativo Same-Origin (instantáneo en Safari iOS + fallback Google Drive)
     window.libretaWebPlayer = (function () {
       var audio = null;
-      var manifest = {};
       var endedFlag = false;
       var playSeq = 0;
 
-      // Precargar mapa de audios alojados en el mismo servidor HTTPS (./audios/manifest.json)
+      // Mapa embebido directo (0 ms, sin BOM ni fetch pendiente) + actualización en segundo plano desde audios/manifest.json
+      var manifest = {"hymn_209":"audios/hymn_209.mp3","hymn_142":"audios/hymn_142.mp3","hymn_17":"audios/hymn_17.mp3","hymn_174":"audios/hymn_174.mp3","hymn_146":"audios/hymn_146.mp3","hymn_364":"audios/hymn_364.m4a","hymn_230":"audios/hymn_230.mp3","hymn_324":"audios/hymn_324.mp3","hymn_310":"audios/hymn_310.mp3","hymn_403":"audios/hymn_403.m4a","hymn_329":"audios/hymn_329.mp3","hymn_312":"audios/hymn_312.mp3","hymn_140":"audios/hymn_140.mp3","hymn_320":"audios/hymn_320.mp3","hymn_229":"audios/hymn_229.mp3","hymn_4":"audios/hymn_4.mp3","hymn_197":"audios/hymn_197.mp3","hymn_13":"audios/hymn_13.mp3","hymn_11":"audios/hymn_11.mp3","hymn_217":"audios/hymn_217.mp3","hymn_303":"audios/hymn_303.mp3","hymn_309":"audios/hymn_309.mp3","hymn_213":"audios/hymn_213.mp3","hymn_176":"audios/hymn_176.mp3","hymn_307":"audios/hymn_307.mp3","hymn_321":"audios/hymn_321.mp3","hymn_129":"audios/hymn_129.mp3","hymn_326":"audios/hymn_326.mp3","hymn_7":"audios/hymn_7.m4a","hymn_195":"audios/hymn_195.mp3","hymn_9":"audios/hymn_9.m4a","hymn_165":"audios/hymn_165.m4a","hymn_198":"audios/hymn_198.mp3","hymn_3":"audios/hymn_3.m4a","hymn_18":"audios/hymn_18.mp3","hymn_15":"audios/hymn_15.mp3","hymn_150":"audios/hymn_150.mp3","hymn_330":"audios/hymn_330.mp3","hymn_5":"audios/hymn_5.m4a","hymn_308":"audios/hymn_308.mp3","hymn_131":"audios/hymn_131.m4a","hymn_1793632403086":"audios/hymn_1793632403086.mp3","hymn_6":"audios/hymn_6.mp3","hymn_305":"audios/hymn_305.mp3","hymn_191":"audios/hymn_191.mp3","hymn_332":"audios/hymn_332.mp3","hymn_12":"audios/hymn_12.mp3","hymn_141":"audios/hymn_141.mp3","hymn_2":"audios/hymn_2.mp3","hymn_1":"audios/hymn_1.m4a","hymn_19":"audios/hymn_19.mp3","hymn_24":"audios/hymn_24.mp3","hymn_175":"audios/hymn_175.mp3","hymn_306":"audios/hymn_306.mp3","hymn_132":"audios/hymn_132.m4a","hymn_21":"audios/hymn_21.mp3","hymn_328":"audios/hymn_328.mp3","hymn_151":"audios/hymn_151.mp3","hymn_144":"audios/hymn_144.mp3","hymn_405":"audios/hymn_405.m4a","hymn_20":"audios/hymn_20.mp3","hymn_322":"audios/hymn_322.mp3","hymn_222":"audios/hymn_222.mp3","hymn_189":"audios/hymn_189.mp3","hymn_170":"audios/hymn_170.mp3"};
+
       fetch('./audios/manifest.json')
-        .then(function (r) { return r.ok ? r.json() : {}; })
-        .then(function (data) { if (data && typeof data === 'object') manifest = data; })
+        .then(function (r) { return r.ok ? r.text() : ''; })
+        .then(function (txt) {
+          if (!txt) return;
+          var clean = txt.replace(/^\uFEFF/, '');
+          var data = JSON.parse(clean);
+          if (data && typeof data === 'object') {
+            Object.assign(manifest, data);
+          }
+        })
         .catch(function () {});
 
       function ensureAudio() {
@@ -166,19 +148,13 @@
         audio = document.createElement('audio');
         audio.setAttribute('playsinline', '');
         audio.setAttribute('webkit-playsinline', '');
-        audio.preload = 'metadata';
+        audio.preload = 'auto';
         audio.style.display = 'none';
         audio.addEventListener('ended', function () {
           endedFlag = true;
         });
         if (document.body) {
           document.body.appendChild(audio);
-        } else {
-          document.addEventListener('DOMContentLoaded', function () {
-            if (audio && !audio.parentNode && document.body) {
-              document.body.appendChild(audio);
-            }
-          });
         }
         return audio;
       }
@@ -193,7 +169,6 @@
           } catch (_) {}
         },
 
-        // Streaming directo SINCRÓNICO dentro del toque del usuario: cero await antes de audio.play()
         playHymn: function (hymnId, fallbackDriveUrl) {
           var a = ensureAudio();
           var mySeq = ++playSeq;
@@ -291,14 +266,6 @@
         clearDecoded: function () {}
       };
     })();
-
-    window.addEventListener('flutter-first-frame', function () {
-      var splash = document.getElementById('loading-splash');
-      if (splash) {
-        splash.style.opacity = '0';
-        setTimeout(function () { splash.remove(); }, 320);
-      }
-    });
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
