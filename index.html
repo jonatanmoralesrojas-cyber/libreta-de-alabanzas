@@ -71,6 +71,83 @@
   </div>
 
   <script>
+    // Caché persistente offline de audios (Cache API + Blob URL) para Safari iOS y navegadores PWA
+    window.libretaAudioCache = (function () {
+      var CACHE_NAME = 'libreta-hymn-audios-v1';
+      var blobUrls = {};
+
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().catch(function () {});
+      }
+
+      function cacheKey(id) {
+        return new URL('./__hymn_audio_cache__/' + encodeURIComponent(id), window.location.href).toString();
+      }
+
+      return {
+        getBlobUrl: async function (id) {
+          if (blobUrls[id]) return blobUrls[id];
+          if (!('caches' in window)) return null;
+          try {
+            var cache = await caches.open(CACHE_NAME);
+            var resp = await cache.match(cacheKey(id));
+            if (!resp) return null;
+            var blob = await resp.blob();
+            if (!blob || blob.size < 1000) return null;
+            var url = URL.createObjectURL(blob);
+            blobUrls[id] = url;
+            return url;
+          } catch (e) {
+            return null;
+          }
+        },
+        putAudio: async function (id, uint8Array, mimeType) {
+          var type = mimeType || 'audio/mp4';
+          var blob = new Blob([uint8Array], { type: type });
+          if (blobUrls[id]) {
+            try { URL.revokeObjectURL(blobUrls[id]); } catch (_) {}
+          }
+          var url = URL.createObjectURL(blob);
+          blobUrls[id] = url;
+          if ('caches' in window) {
+            try {
+              var cache = await caches.open(CACHE_NAME);
+              var resp = new Response(blob, {
+                headers: {
+                  'Content-Type': type,
+                  'Content-Length': String(blob.size)
+                }
+              });
+              await cache.put(cacheKey(id), resp);
+            } catch (e) {}
+          }
+          return url;
+        },
+        hasAudio: async function (id) {
+          if (blobUrls[id]) return true;
+          if (!('caches' in window)) return false;
+          try {
+            var cache = await caches.open(CACHE_NAME);
+            var resp = await cache.match(cacheKey(id));
+            return !!resp;
+          } catch (e) {
+            return false;
+          }
+        },
+        deleteAudio: async function (id) {
+          if (blobUrls[id]) {
+            try { URL.revokeObjectURL(blobUrls[id]); } catch (_) {}
+            delete blobUrls[id];
+          }
+          if (!('caches' in window)) return;
+          try {
+            var cache = await caches.open(CACHE_NAME);
+            await cache.delete(cacheKey(id));
+          } catch (e) {}
+        }
+      };
+    })();
+
     window.addEventListener('flutter-first-frame', function () {
       var splash = document.getElementById('loading-splash');
       if (splash) {
