@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <base href="/libreta-de-alabanzas/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="Libreta de Alabanzas IEP — Himnario oficial con 408 himnos, acordes y reproductor de audio.">
+  <meta name="theme-color" content="#173B3F">
+
+  <!-- iOS Safari PWA meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Libreta IEP">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png">
+
+  <title>Libreta de Alabanzas IEP</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #173B3F;
+      overscroll-behavior: none;
+    }
+    #loading-splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, #173B3F 0%, #167D75 100%);
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      z-index: 9999;
+      transition: opacity 0.3s ease;
+    }
+    #loading-splash img {
+      width: 112px;
+      height: 112px;
+      border-radius: 26px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+      margin-bottom: 18px;
+    }
+    #loading-splash h1 {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      margin: 0 0 6px 0;
+    }
+    #loading-splash p {
+      font-size: 13px;
+      opacity: 0.85;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading-splash">
+    <img src="icons/apple-touch-icon.png" alt="Libreta de Alabanzas IEP">
+    <h1>LIBRETA DE ALABANZAS</h1>
+    <p>Cargando himnario...</p>
+  </div>
+
+  <script>
+    window.addEventListener('flutter-first-frame', function () {
+      var splash = document.getElementById('loading-splash');
+      if (splash) {
+        splash.style.opacity = '0';
+        setTimeout(function () { splash.remove(); }, 320);
+      }
+    });
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
