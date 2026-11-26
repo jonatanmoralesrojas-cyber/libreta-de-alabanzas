@@ -27758,7 +27758,7 @@ n=J
 s=3
 return A.k(A.eT(),$async$lA)
 case 3:p=o.bu(n.aM(b.a,"gas_api_url"))
-if(p==null||B.c.aV(p).length===0){q="https://script.google.com/macros/s/AKfycbwGGadfhQWFPtsVn8PIzy28zeElkmUgHQrPkesrZ8zR7Wgkifkh6rcxkf1kTNS0GNJf/exec"
+if(p==null||B.c.aV(p).length===0){q="https://script.google.com/macros/s/AKfycbx6dpNXGqEuOdzRE-eoUKgOO-6eQHD-j9_dC2NUN2uFn3iYQl9_cPysVqU5lqIU9T4f/exec"
 s=1
 break}q=B.c.aV(p)
 s=1
