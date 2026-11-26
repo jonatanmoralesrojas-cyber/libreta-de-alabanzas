@@ -80,14 +80,14 @@
   </div>
 
   <script>
-    // Limpiar cualquier Service Worker antiguo silenciosamente sin forzar recargas en iOS Standalone PWA
+    // Limpiar Service Workers heredados sin forzar recargas en iOS Standalone PWA
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function (regs) {
         regs.forEach(function (r) { r.unregister().catch(function () {}); });
       }).catch(function () {});
     }
 
-    // Garantizar que la pantalla de carga nunca bloquee toques en Safari iOS Standalone
+    // Garantizar que la pantalla de carga desaparezca siempre sin bloquear toques
     (function () {
       var removed = false;
       function hideSplash() {
@@ -114,147 +114,656 @@
       setTimeout(hideSplash, 4500);
     })();
 
-    // Stub de caché web (compatibilidad)
-    window.libretaAudioCache = {
-      getBlobUrl: async function () { return null; },
-      putAudio: async function () { return null; },
-      hasAudio: async function () { return false; },
-      deleteAudio: async function () {}
-    };
-
-    // Reproductor HTML5 <audio playsinline> nativo Same-Origin (instantáneo en Safari iOS + fallback Google Drive)
+    // =========================================================================
+    // MOTOR DEFINITIVO DE AUDIO WEB/PWA PARA IPHONE SAFARI + INDEXEDDB OFFLINE
+    // =========================================================================
     window.libretaWebPlayer = (function () {
-      var audio = null;
+      var DB_NAME = 'LibretaAlabanzasAudioDB';
+      var DB_VERSION = 1;
+      var STORE_NAME = 'hymn_audios';
+      var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+      var dbPromise = null;
+      var inFlightDownloads = {};
+      var audioEl = null;
+      var activeBlobUrl = null;
+      var html5Unlocked = false;
+
+      // Rescate Web Audio API (si Safari iOS Standalone rechaza blob: URL en <audio> con NotSupportedError)
+      var audioCtx = null;
+      var waSource = null;
+      var waBuffer = null;
+      var waStartTime = 0;
+      var waOffsetSec = 0;
+      var waPaused = true;
+      var usingWebAudio = false;
+
       var endedFlag = false;
       var playSeq = 0;
 
-      // Mapa embebido directo (0 ms, sin BOM ni fetch pendiente) + actualización en segundo plano desde audios/manifest.json
-      var manifest = {"hymn_209":"audios/hymn_209.mp3","hymn_142":"audios/hymn_142.mp3","hymn_17":"audios/hymn_17.mp3","hymn_174":"audios/hymn_174.mp3","hymn_146":"audios/hymn_146.mp3","hymn_364":"audios/hymn_364.m4a","hymn_230":"audios/hymn_230.mp3","hymn_324":"audios/hymn_324.mp3","hymn_310":"audios/hymn_310.mp3","hymn_403":"audios/hymn_403.m4a","hymn_329":"audios/hymn_329.mp3","hymn_312":"audios/hymn_312.mp3","hymn_140":"audios/hymn_140.mp3","hymn_320":"audios/hymn_320.mp3","hymn_229":"audios/hymn_229.mp3","hymn_4":"audios/hymn_4.mp3","hymn_197":"audios/hymn_197.mp3","hymn_13":"audios/hymn_13.mp3","hymn_11":"audios/hymn_11.mp3","hymn_217":"audios/hymn_217.mp3","hymn_303":"audios/hymn_303.mp3","hymn_309":"audios/hymn_309.mp3","hymn_213":"audios/hymn_213.mp3","hymn_176":"audios/hymn_176.mp3","hymn_307":"audios/hymn_307.mp3","hymn_321":"audios/hymn_321.mp3","hymn_129":"audios/hymn_129.mp3","hymn_326":"audios/hymn_326.mp3","hymn_7":"audios/hymn_7.m4a","hymn_195":"audios/hymn_195.mp3","hymn_9":"audios/hymn_9.m4a","hymn_165":"audios/hymn_165.m4a","hymn_198":"audios/hymn_198.mp3","hymn_3":"audios/hymn_3.m4a","hymn_18":"audios/hymn_18.mp3","hymn_15":"audios/hymn_15.mp3","hymn_150":"audios/hymn_150.mp3","hymn_330":"audios/hymn_330.mp3","hymn_5":"audios/hymn_5.m4a","hymn_308":"audios/hymn_308.mp3","hymn_131":"audios/hymn_131.m4a","hymn_1793632403086":"audios/hymn_1793632403086.mp3","hymn_6":"audios/hymn_6.mp3","hymn_305":"audios/hymn_305.mp3","hymn_191":"audios/hymn_191.mp3","hymn_332":"audios/hymn_332.mp3","hymn_12":"audios/hymn_12.mp3","hymn_141":"audios/hymn_141.mp3","hymn_2":"audios/hymn_2.mp3","hymn_1":"audios/hymn_1.m4a","hymn_19":"audios/hymn_19.mp3","hymn_24":"audios/hymn_24.mp3","hymn_175":"audios/hymn_175.mp3","hymn_306":"audios/hymn_306.mp3","hymn_132":"audios/hymn_132.m4a","hymn_21":"audios/hymn_21.mp3","hymn_328":"audios/hymn_328.mp3","hymn_151":"audios/hymn_151.mp3","hymn_144":"audios/hymn_144.mp3","hymn_405":"audios/hymn_405.m4a","hymn_20":"audios/hymn_20.mp3","hymn_322":"audios/hymn_322.mp3","hymn_222":"audios/hymn_222.mp3","hymn_189":"audios/hymn_189.mp3","hymn_170":"audios/hymn_170.mp3"};
+      // Espejo de respaldo same-origin (solo si Drive falla por CORS/ITP en Safari; Drive sigue siendo la fuente primaria)
+      var fallbackManifest = {"hymn_209":"audios/hymn_209.mp3","hymn_142":"audios/hymn_142.mp3","hymn_17":"audios/hymn_17.mp3","hymn_174":"audios/hymn_174.mp3","hymn_146":"audios/hymn_146.mp3","hymn_364":"audios/hymn_364.m4a","hymn_230":"audios/hymn_230.mp3","hymn_324":"audios/hymn_324.mp3","hymn_310":"audios/hymn_310.mp3","hymn_403":"audios/hymn_403.m4a","hymn_329":"audios/hymn_329.mp3","hymn_312":"audios/hymn_312.mp3","hymn_140":"audios/hymn_140.mp3","hymn_320":"audios/hymn_320.mp3","hymn_229":"audios/hymn_229.mp3","hymn_4":"audios/hymn_4.mp3","hymn_197":"audios/hymn_197.mp3","hymn_13":"audios/hymn_13.mp3","hymn_11":"audios/hymn_11.mp3","hymn_217":"audios/hymn_217.mp3","hymn_303":"audios/hymn_303.mp3","hymn_309":"audios/hymn_309.mp3","hymn_213":"audios/hymn_213.mp3","hymn_176":"audios/hymn_176.mp3","hymn_307":"audios/hymn_307.mp3","hymn_321":"audios/hymn_321.mp3","hymn_129":"audios/hymn_129.mp3","hymn_326":"audios/hymn_326.mp3","hymn_7":"audios/hymn_7.m4a","hymn_195":"audios/hymn_195.mp3","hymn_9":"audios/hymn_9.m4a","hymn_165":"audios/hymn_165.m4a","hymn_198":"audios/hymn_198.mp3","hymn_3":"audios/hymn_3.m4a","hymn_18":"audios/hymn_18.mp3","hymn_15":"audios/hymn_15.mp3","hymn_150":"audios/hymn_150.mp3","hymn_330":"audios/hymn_330.mp3","hymn_5":"audios/hymn_5.m4a","hymn_308":"audios/hymn_308.mp3","hymn_131":"audios/hymn_131.m4a","hymn_1793632403086":"audios/hymn_1793632403086.mp3","hymn_6":"audios/hymn_6.mp3","hymn_305":"audios/hymn_305.mp3","hymn_191":"audios/hymn_191.mp3","hymn_332":"audios/hymn_332.mp3","hymn_12":"audios/hymn_12.mp3","hymn_141":"audios/hymn_141.mp3","hymn_2":"audios/hymn_2.mp3","hymn_1":"audios/hymn_1.m4a","hymn_19":"audios/hymn_19.mp3","hymn_24":"audios/hymn_24.mp3","hymn_175":"audios/hymn_175.mp3","hymn_306":"audios/hymn_306.mp3","hymn_132":"audios/hymn_132.m4a","hymn_21":"audios/hymn_21.mp3","hymn_328":"audios/hymn_328.mp3","hymn_151":"audios/hymn_151.mp3","hymn_144":"audios/hymn_144.mp3","hymn_405":"audios/hymn_405.m4a","hymn_20":"audios/hymn_20.mp3","hymn_322":"audios/hymn_322.mp3","hymn_222":"audios/hymn_222.mp3","hymn_189":"audios/hymn_189.mp3","hymn_170":"audios/hymn_170.mp3"};
 
-      fetch('./audios/manifest.json')
-        .then(function (r) { return r.ok ? r.text() : ''; })
-        .then(function (txt) {
-          if (!txt) return;
-          var clean = txt.replace(/^\uFEFF/, '');
-          var data = JSON.parse(clean);
-          if (data && typeof data === 'object') {
-            Object.assign(manifest, data);
-          }
-        })
-        .catch(function () {});
-
-      function ensureAudio() {
-        if (audio) return audio;
-        audio = document.createElement('audio');
-        audio.setAttribute('playsinline', '');
-        audio.setAttribute('webkit-playsinline', '');
-        audio.preload = 'auto';
-        audio.style.display = 'none';
-        audio.addEventListener('ended', function () {
-          endedFlag = true;
-        });
-        if (document.body) {
-          document.body.appendChild(audio);
-        }
-        return audio;
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().catch(function () {});
       }
 
-      return {
-        unlock: function () {
-          ensureAudio();
+      // ---- D. INDEXEDDB ----
+      function openDb() {
+        if (dbPromise) return dbPromise;
+        dbPromise = new Promise(function (resolve, reject) {
+          if (!('indexedDB' in window)) {
+            resolve(null);
+            return;
+          }
           try {
-            if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
-              navigator.audioSession.type = 'playback';
-            }
-          } catch (_) {}
-        },
+            var req = indexedDB.open(DB_NAME, DB_VERSION);
+            req.onupgradeneeded = function (e) {
+              var db = e.target.result;
+              if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+              }
+            };
+            req.onsuccess = function (e) { resolve(e.target.result); };
+            req.onerror = function () { resolve(null); };
+          } catch (_) {
+            resolve(null);
+          }
+        });
+        return dbPromise;
+      }
 
-        playHymn: function (hymnId, fallbackDriveUrl) {
-          var a = ensureAudio();
-          var mySeq = ++playSeq;
-          endedFlag = false;
+      async function idbGet(id) {
+        var db = await openDb();
+        if (!db) return null;
+        return new Promise(function (resolve) {
+          try {
+            var tx = db.transaction(STORE_NAME, 'readonly');
+            var req = tx.objectStore(STORE_NAME).get(id);
+            req.onsuccess = function () { resolve(req.result || null); };
+            req.onerror = function () { resolve(null); };
+          } catch (_) {
+            resolve(null);
+          }
+        });
+      }
 
-          var localRel = manifest[hymnId];
-          var targetUrl = localRel
-            ? new URL('./' + localRel, window.location.href).toString()
-            : fallbackDriveUrl;
+      async function idbPut(record) {
+        var db = await openDb();
+        if (!db) return false;
+        return new Promise(function (resolve) {
+          try {
+            var tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).put(record);
+            tx.oncomplete = function () { resolve(true); };
+            tx.onerror = function () { resolve(false); };
+          } catch (_) {
+            resolve(false);
+          }
+        });
+      }
 
-          if (!targetUrl) {
-            return Promise.reject(new Error('No hay audio registrado para este himno'));
+      async function idbDelete(id) {
+        var db = await openDb();
+        if (!db) return;
+        return new Promise(function (resolve) {
+          try {
+            var tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(id);
+            tx.oncomplete = function () { resolve(); };
+            tx.onerror = function () { resolve(); };
+          } catch (_) {
+            resolve();
+          }
+        });
+      }
+
+      // ---- A & B. VALIDACIÓN BINARIA ESTRICTA (NO CONFIAR EN EXTENSIÓN .mp3) ----
+      function inspectAudioBinary(arrayBuffer) {
+        if (!arrayBuffer || arrayBuffer.byteLength < 1024) {
+          return { valid: false, reason: 'El archivo descargado está vacío o incompleto (' + (arrayBuffer ? arrayBuffer.byteLength : 0) + ' bytes).' };
+        }
+        var b = new Uint8Array(arrayBuffer, 0, Math.min(64, arrayBuffer.byteLength));
+
+        // 1. Rechazar HTML, JSON, XML o páginas de inicio de sesión/permisos de Google
+        var headText = '';
+        for (var i = 0; i < b.length; i++) {
+          headText += String.fromCharCode(b[i]);
+        }
+        var trimmed = headText.trim().toLowerCase();
+        if (
+          trimmed.indexOf('<!doctype') === 0 ||
+          trimmed.indexOf('<html') === 0 ||
+          trimmed.indexOf('<head') === 0 ||
+          trimmed.indexOf('<?xml') === 0
+        ) {
+          return { valid: false, reason: 'Google Drive devolvió una página HTML (posible falta de permisos públicos o aviso de descarga) en lugar del audio.' };
+        }
+        if (trimmed.indexOf('{') === 0 || trimmed.indexOf('[') === 0) {
+          return { valid: false, reason: 'Google Drive devolvió una respuesta JSON de error en lugar del audio.' };
+        }
+
+        // 2. MP3 con etiqueta ID3 ("ID3")
+        if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) {
+          return { valid: true, ext: 'mp3', mimeType: 'audio/mpeg' };
+        }
+
+        // 3. Contenedor ISO BMFF / MP4 / M4A / 3GP4 ("ftyp" en bytes 4..7)
+        if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+          return { valid: true, ext: 'm4a', mimeType: 'audio/mp4' };
+        }
+
+        // 4. WAV ("RIFF....WAVE")
+        if (
+          b.length >= 12 &&
+          b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+          b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45
+        ) {
+          return { valid: true, ext: 'wav', mimeType: 'audio/wav' };
+        }
+
+        // 5. FLAC ("fLaC")
+        if (b[0] === 0x66 && b[1] === 0x4C && b[2] === 0x61 && b[3] === 0x43) {
+          return { valid: true, ext: 'flac', mimeType: 'audio/flac' };
+        }
+
+        // 6. OGG ("OggS")
+        if (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53) {
+          return { valid: true, ext: 'ogg', mimeType: 'audio/ogg' };
+        }
+
+        // 7. Frame sync MPEG MP3 sin cabecera ID3 (0xFF + 0xE0) o ADTS AAC
+        if (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0) {
+          var layer = (b[1] & 0x06);
+          if (layer === 0) {
+            return { valid: true, ext: 'aac', mimeType: 'audio/aac' };
+          }
+          return { valid: true, ext: 'mp3', mimeType: 'audio/mpeg' };
+        }
+
+        return { valid: false, reason: 'El archivo descargado no contiene bytes de audio válidos (cabecera desconocida).' };
+      }
+
+      function extractDriveId(driveId, url) {
+        if (driveId && String(driveId).trim().length > 5) return String(driveId).trim();
+        if (!url) return '';
+        var m1 = /[?&]id=([a-zA-Z0-9_-]+)/.exec(url);
+        if (m1 && m1[1]) return m1[1];
+        var m2 = /\/d\/([a-zA-Z0-9_-]+)/.exec(url);
+        if (m2 && m2[1]) return m2[1];
+        return '';
+      }
+
+      async function fetchBinaryAndValidate(url) {
+        var resp;
+        try {
+          resp = await fetch(url, { mode: 'cors', credentials: 'omit' });
+        } catch (netErr) {
+          var e = new Error('NetworkError: No se pudo conectar para descargar el audio (' + (netErr && netErr.message ? netErr.message : netErr) + ')');
+          e.name = 'NetworkError';
+          throw e;
+        }
+        if (!resp.ok) {
+          var he = new Error('NetworkError: Error HTTP ' + resp.status + ' al descargar el audio.');
+          he.name = 'NetworkError';
+          throw he;
+        }
+        var contentType = (resp.headers.get('content-type') || '').toLowerCase();
+        var ab = await resp.arrayBuffer();
+        var check = inspectAudioBinary(ab);
+        if (!check.valid) {
+          var ve = new Error(check.reason + (contentType ? ' [Content-Type: ' + contentType + ']' : ''));
+          ve.name = 'NotSupportedError';
+          throw ve;
+        }
+        return {
+          bytes: ab,
+          mimeType: check.mimeType,
+          ext: check.ext,
+          size: ab.byteLength,
+          httpContentType: contentType
+        };
+      }
+
+      // Obtiene el audio desde IndexedDB o lo descarga, valida y guarda (sin descargas duplicadas)
+      async function ensureAudioInIndexedDb(hymnId, driveId, audioUrl) {
+        var resolvedDriveId = extractDriveId(driveId, audioUrl);
+
+        // 1. Verificar IndexedDB primero
+        var existing = await idbGet(hymnId);
+        if (existing && existing.bytes && existing.bytes.byteLength > 1024) {
+          var sameDrive = !resolvedDriveId || !existing.driveId || existing.driveId === resolvedDriveId;
+          var checkExisting = inspectAudioBinary(existing.bytes);
+          if (sameDrive && checkExisting.valid) {
+            return {
+              record: {
+                id: existing.id,
+                driveId: existing.driveId || resolvedDriveId,
+                mimeType: checkExisting.mimeType,
+                ext: checkExisting.ext,
+                size: existing.bytes.byteLength,
+                bytes: existing.bytes
+              },
+              downloadedNow: false
+            };
+          }
+          // Registro obsoleto o corrupto -> limpiar
+          await idbDelete(hymnId);
+        }
+
+        // 2. Evitar descargas duplicadas simultáneas
+        if (inFlightDownloads[hymnId]) {
+          return inFlightDownloads[hymnId];
+        }
+
+        var downloadTask = (async function () {
+          var candidates = [];
+          if (resolvedDriveId) {
+            candidates.push('https://drive.usercontent.google.com/download?id=' + encodeURIComponent(resolvedDriveId) + '&export=download&confirm=t');
+          } else if (audioUrl) {
+            candidates.push(audioUrl);
+          }
+          var mirrorRel = fallbackManifest[hymnId];
+          if (mirrorRel) {
+            candidates.push(new URL('./' + mirrorRel, window.location.href).toString());
           }
 
-          try {
-            if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
-              navigator.audioSession.type = 'playback';
-            }
-          } catch (_) {}
+          if (candidates.length === 0) {
+            var noErr = new Error('No hay audio registrado en Google Drive para este himno.');
+            noErr.name = 'NotSupportedError';
+            throw noErr;
+          }
 
-          a.pause();
+          var lastErr = null;
+          for (var i = 0; i < candidates.length; i++) {
+            try {
+              var result = await fetchBinaryAndValidate(candidates[i]);
+              var record = {
+                id: hymnId,
+                driveId: resolvedDriveId,
+                mimeType: result.mimeType,
+                ext: result.ext,
+                size: result.size,
+                bytes: result.bytes,
+                savedAt: Date.now()
+              };
+              await idbPut(record);
+              return { record: record, downloadedNow: true };
+            } catch (err) {
+              lastErr = err;
+            }
+          }
+          throw lastErr || new Error('NetworkError: No se pudo descargar el audio desde Google Drive.');
+        })();
+
+        inFlightDownloads[hymnId] = downloadTask;
+        try {
+          return await downloadTask;
+        } finally {
+          delete inFlightDownloads[hymnId];
+        }
+      }
+
+      // ---- C. REPRODUCTOR HTML5 + RESCATE WEB AUDIO API EN SAFARI iOS ----
+      function ensureAudioElement() {
+        if (audioEl) return audioEl;
+        audioEl = document.createElement('audio');
+        audioEl.setAttribute('playsinline', '');
+        audioEl.setAttribute('webkit-playsinline', '');
+        audioEl.preload = 'auto';
+        audioEl.style.display = 'none';
+        audioEl.addEventListener('ended', function () {
+          if (!usingWebAudio && activeBlobUrl) {
+            endedFlag = true;
+          }
+        });
+        if (document.body) {
+          document.body.appendChild(audioEl);
+        }
+        return audioEl;
+      }
+
+      function ensureAudioContext() {
+        if (!audioCtx) {
+          var Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) audioCtx = new Ctx();
+        }
+        try {
+          if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
+            navigator.audioSession.type = 'playback';
+          }
+        } catch (_) {}
+        return audioCtx;
+      }
+
+      function stopWebAudioOnly() {
+        if (waSource) {
+          try {
+            waSource.onended = null;
+            waSource.stop(0);
+            waSource.disconnect();
+          } catch (_) {}
+          waSource = null;
+        }
+      }
+
+      function stopHtml5AndRevokeBlob() {
+        if (audioEl) {
+          try {
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+          } catch (_) {}
+        }
+        if (activeBlobUrl) {
+          var toRevoke = activeBlobUrl;
+          activeBlobUrl = null;
+          // Revocar solo DESPUÉS de detener el reproductor
+          setTimeout(function () {
+            try { URL.revokeObjectURL(toRevoke); } catch (_) {}
+          }, 500);
+        }
+      }
+
+      function stopAllPlayback() {
+        usingWebAudio = false;
+        waPaused = true;
+        waBuffer = null;
+        waOffsetSec = 0;
+        endedFlag = false;
+        stopWebAudioOnly();
+        stopHtml5AndRevokeBlob();
+      }
+
+      function decodeWithWebAudio(ctx, arrayBuffer) {
+        return new Promise(function (resolve, reject) {
+          var copy = arrayBuffer.slice(0);
+          var p = ctx.decodeAudioData(
+            copy,
+            function (decoded) { resolve(decoded); },
+            function (err) { reject(err || new Error('NotSupportedError: No se pudo decodificar el archivo de audio.')); }
+          );
+          if (p && typeof p.then === 'function') {
+            p.then(resolve).catch(reject);
+          }
+        });
+      }
+
+      function startWebAudioBufferAt(ctx, buffer, startSec, mySeq) {
+        stopWebAudioOnly();
+        usingWebAudio = true;
+        waBuffer = buffer;
+        waOffsetSec = Math.max(0, Math.min(startSec, buffer.duration));
+        endedFlag = false;
+        var src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(ctx.destination);
+        src.onended = function () {
+          if (mySeq === playSeq && waSource === src && !waPaused && usingWebAudio) {
+            waSource = null;
+            waPaused = true;
+            waOffsetSec = buffer.duration;
+            endedFlag = true;
+          }
+        };
+        waSource = src;
+        waStartTime = ctx.currentTime;
+        waPaused = false;
+        src.start(0, waOffsetSec);
+      }
+
+      function formatFriendlyError(err, audioElement) {
+        var name = (err && err.name) ? String(err.name) : '';
+        var msg = (err && err.message) ? String(err.message) : String(err || 'Error desconocido');
+
+        if (audioElement && audioElement.error) {
+          var code = audioElement.error.code;
+          var mediaDetail = {
+            1: 'Reproducción abortada por el usuario o sistema',
+            2: 'Error de red durante la lectura del audio',
+            3: 'Error al decodificar el archivo de audio',
+            4: 'Formato de audio no compatible en Safari'
+          }[code] || 'Error de medios desconocido';
+          return 'MediaError (código ' + code + '): ' + mediaDetail;
+        }
+        if (name === 'NotSupportedError' || msg.indexOf('NotSupportedError') >= 0) {
+          return 'NotSupportedError: El formato o códec del audio no es compatible (' + msg + ')';
+        }
+        if (name === 'NetworkError' || msg.indexOf('NetworkError') >= 0 || msg.indexOf('Load failed') >= 0 || msg.indexOf('Failed to fetch') >= 0) {
+          return 'NetworkError: No se pudo descargar el audio desde Google Drive. Verifica tu conexión a internet.';
+        }
+        if (name === 'AbortError' || msg.indexOf('AbortError') >= 0) {
+          return 'AbortError: La reproducción se interrumpió antes de iniciar. Intenta tocar Play nuevamente.';
+        }
+        if (name === 'NotAllowedError') {
+          return 'NotAllowedError: Safari bloqueó la reproducción automática. Toca directamente el botón Play.';
+        }
+        return msg;
+      }
+
+      async function playRecordHtml5WithRescue(record, mySeq) {
+        stopAllPlayback();
+        if (mySeq !== playSeq) return 'superseded';
+
+        // B. Crear Blob con MIME real validado (audio/mpeg para MP3, audio/mp4 para M4A/3GP4) sin alterar bytes
+        var audioBlob = new Blob([record.bytes], { type: record.mimeType });
+        var blobUrl = URL.createObjectURL(audioBlob);
+        if (!blobUrl || blobUrl.indexOf('blob:') !== 0) {
+          throw new Error('No se pudo crear una URL local válida para el Blob de audio.');
+        }
+
+        var a = ensureAudioElement();
+        activeBlobUrl = blobUrl;
+        usingWebAudio = false;
+        endedFlag = false;
+
+        try {
           a.muted = false;
           a.volume = 1.0;
-          a.src = targetUrl;
+          a.src = blobUrl;
+          a.load();
+
+          if (mySeq !== playSeq) {
+            stopAllPlayback();
+            return 'superseded';
+          }
 
           var playPromise = a.play();
           if (playPromise && typeof playPromise.then === 'function') {
-            return playPromise.then(function () {
-              return mySeq === playSeq ? 'streamed' : 'superseded';
-            }).catch(function (err) {
-              if (mySeq !== playSeq) return 'superseded';
-              if (localRel && fallbackDriveUrl && targetUrl !== fallbackDriveUrl) {
-                a.src = fallbackDriveUrl;
-                return a.play().then(function () {
-                  return mySeq === playSeq ? 'streamed' : 'superseded';
-                });
-              }
-              throw err;
-            });
+            await playPromise;
           }
-          return Promise.resolve('streamed');
+          html5Unlocked = true;
+          return 'ok';
+        } catch (html5Err) {
+          if (mySeq !== playSeq) {
+            stopAllPlayback();
+            return 'superseded';
+          }
+
+          // Rescate automático en Safari iOS PWA si <audio> arroja NotSupportedError sobre blob: URL
+          var errName = html5Err && html5Err.name ? html5Err.name : '';
+          var isNotSupported = errName === 'NotSupportedError' ||
+              (a.error && a.error.code === 4) ||
+              String(html5Err).indexOf('NotSupportedError') >= 0;
+
+          if (isNotSupported) {
+            stopHtml5AndRevokeBlob();
+            try {
+              var ctx = ensureAudioContext();
+              if (ctx) {
+                if (ctx.state === 'suspended') {
+                  try { await ctx.resume(); } catch (_) {}
+                }
+                var decoded = await decodeWithWebAudio(ctx, record.bytes);
+                if (mySeq !== playSeq) return 'superseded';
+                startWebAudioBufferAt(ctx, decoded, 0, mySeq);
+                return 'ok';
+              }
+            } catch (waErr) {
+              throw new Error(formatFriendlyError(waErr, null));
+            }
+          }
+
+          var friendly = formatFriendlyError(html5Err, a);
+          stopHtml5AndRevokeBlob();
+          throw new Error(friendly);
+        }
+      }
+
+      return {
+        // Desbloqueo síncrono obligatorio dentro del gesto directo del usuario en Safari iOS
+        unlock: function () {
+          try {
+            if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
+              navigator.audioSession.type = 'playback';
+            }
+          } catch (_) {}
+
+          try {
+            var ctx = ensureAudioContext();
+            if (ctx) {
+              if (ctx.state === 'suspended') {
+                ctx.resume().catch(function () {});
+              }
+              var silent = ctx.createBuffer(1, 1, 22050);
+              var src = ctx.createBufferSource();
+              src.buffer = silent;
+              src.connect(ctx.destination);
+              src.start(0);
+            }
+          } catch (_) {}
+
+          if (!html5Unlocked) {
+            try {
+              var a = ensureAudioElement();
+              a.muted = true;
+              a.src = SILENT_WAV;
+              var p = a.play();
+              if (p && typeof p.then === 'function') {
+                p.then(function () {
+                  html5Unlocked = true;
+                  if (a.src === SILENT_WAV) a.pause();
+                }).catch(function () {});
+              }
+            } catch (_) {}
+          }
+        },
+
+        // D. Flujo completo: IndexedDB -> (si falta) Drive -> validar -> guardar en IndexedDB -> reproducir
+        playHymn: async function (hymnId, driveId, audioUrl) {
+          var mySeq = ++playSeq;
+          endedFlag = false;
+          // Evitar dos reproducciones simultáneas desde el inicio
+          stopAllPlayback();
+
+          var ensured = await ensureAudioInIndexedDb(hymnId, driveId, audioUrl);
+          if (mySeq !== playSeq) return 'superseded';
+
+          var playRes = await playRecordHtml5WithRescue(ensured.record, mySeq);
+          if (playRes === 'superseded' || mySeq !== playSeq) return 'superseded';
+
+          return ensured.downloadedNow ? 'downloaded' : 'cached';
+        },
+
+        // E. Precarga en segundo plano para el reproductor automático (valida y guarda en IndexedDB sin reproducir)
+        prefetchHymn: async function (hymnId, driveId, audioUrl) {
+          try {
+            await ensureAudioInIndexedDb(hymnId, driveId, audioUrl);
+            return true;
+          } catch (_) {
+            return false;
+          }
+        },
+
+        hasCachedAudio: async function (hymnId) {
+          var rec = await idbGet(hymnId);
+          return !!(rec && rec.bytes && rec.bytes.byteLength > 1024);
+        },
+
+        deleteCachedAudio: async function (hymnId) {
+          await idbDelete(hymnId);
         },
 
         pause: function () {
-          if (audio) audio.pause();
+          if (usingWebAudio) {
+            if (!audioCtx || !waBuffer || waPaused) return;
+            waOffsetSec = Math.max(0, Math.min(waOffsetSec + (audioCtx.currentTime - waStartTime), waBuffer.duration));
+            waPaused = true;
+            stopWebAudioOnly();
+          } else if (audioEl) {
+            audioEl.pause();
+          }
         },
 
-        resume: function () {
-          var a = ensureAudio();
-          if (!a.src) return Promise.resolve();
+        resume: async function () {
+          if (usingWebAudio) {
+            if (!waBuffer || !waPaused) return;
+            var ctx = ensureAudioContext();
+            if (ctx && ctx.state === 'suspended') {
+              try { await ctx.resume(); } catch (_) {}
+            }
+            var mySeq = ++playSeq;
+            startWebAudioBufferAt(ctx, waBuffer, waOffsetSec >= waBuffer.duration ? 0 : waOffsetSec, mySeq);
+            return;
+          }
+          var a = ensureAudioElement();
+          if (!a.src || !activeBlobUrl) return;
           endedFlag = false;
           a.muted = false;
           var p = a.play();
-          return (p && typeof p.then === 'function') ? p : Promise.resolve();
+          if (p && typeof p.then === 'function') {
+            await p;
+          }
         },
 
         stop: function () {
           playSeq++;
-          endedFlag = false;
-          if (!audio) return;
-          audio.pause();
-          try { audio.currentTime = 0; } catch (_) {}
+          stopAllPlayback();
         },
 
         seekMs: function (ms) {
-          if (!audio) return;
-          try {
-            audio.currentTime = Math.max(0, ms / 1000);
-          } catch (_) {}
+          if (usingWebAudio) {
+            if (!waBuffer) return;
+            var target = Math.max(0, Math.min(ms / 1000, waBuffer.duration));
+            waOffsetSec = target;
+            if (!waPaused && audioCtx) {
+              var mySeq = ++playSeq;
+              startWebAudioBufferAt(audioCtx, waBuffer, target, mySeq);
+            }
+            return;
+          }
+          if (audioEl && activeBlobUrl) {
+            try {
+              audioEl.currentTime = Math.max(0, ms / 1000);
+            } catch (_) {}
+          }
         },
 
         getPositionMs: function () {
-          if (!audio || !audio.src) return 0;
-          var t = audio.currentTime;
+          if (usingWebAudio) {
+            if (!waBuffer) return 0;
+            if (waPaused || !audioCtx) return Math.floor(waOffsetSec * 1000);
+            var cur = Math.min(waOffsetSec + (audioCtx.currentTime - waStartTime), waBuffer.duration);
+            return Math.max(0, Math.floor(cur * 1000));
+          }
+          if (!audioEl || !activeBlobUrl) return 0;
+          var t = audioEl.currentTime;
           return (isFinite(t) && t >= 0) ? Math.floor(t * 1000) : 0;
         },
 
         getDurationMs: function () {
-          if (!audio || !audio.src) return 0;
-          var d = audio.duration;
+          if (usingWebAudio) {
+            return waBuffer ? Math.floor(waBuffer.duration * 1000) : 0;
+          }
+          if (!audioEl || !activeBlobUrl) return 0;
+          var d = audioEl.duration;
           return (isFinite(d) && d > 0) ? Math.floor(d * 1000) : 0;
         },
 
         isPaused: function () {
-          if (!audio) return true;
-          return !!audio.paused;
+          if (usingWebAudio) return waPaused;
+          if (!audioEl) return true;
+          return !!audioEl.paused;
         },
 
         consumeEnded: function () {
@@ -266,6 +775,14 @@
         clearDecoded: function () {}
       };
     })();
+
+    // Puente de compatibilidad para consultas de caché
+    window.libretaAudioCache = {
+      getBlobUrl: async function () { return null; },
+      putAudio: async function () { return null; },
+      hasAudio: function (id) { return window.libretaWebPlayer.hasCachedAudio(id); },
+      deleteAudio: function (id) { return window.libretaWebPlayer.deleteCachedAudio(id); }
+    };
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
